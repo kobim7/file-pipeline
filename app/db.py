@@ -15,3 +15,8 @@ def ping() -> bool:
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     return True
+
+
+def get_session():
+    with SessionLocal() as session:
+        yield session

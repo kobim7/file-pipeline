@@ -1,4 +1,11 @@
 from pathlib import Path
+import uuid
+from app.db import get_session
+from fastapi import Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.models import Job
+from app.schemas import JobOut
 
 import structlog
 from fastapi import FastAPI
@@ -24,5 +31,9 @@ def on_startup() -> None:
 def health() -> dict:
     return {"status": "ok", "db": db.ping()}
 
-# TODO: POST /jobs (streaming upload), GET /jobs/{id}, GET /jobs/{id}/result,
-#       POST /jobs/{id}/cancel
+@app.get("/jobs/{job_id}", response_model=JobOut)
+def get_job(job_id: uuid.UUID, session: Session = Depends(get_session)):
+    job = session.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JobOut.model_validate(job)
