@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pipeline
+      POSTGRES_PASSWORD: pipeline
+      POSTGRES_DB: pipeline
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pipeline"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/code/app          # live code reload while developing
+      - ./tests:/code/tests
+      - storage:/data            # shared file storage (inputs / intermediates / outputs)
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build: .
+    env_file: .env
+    volumes:
+      - ./app:/code/app
+      - storage:/data
+    command: python -m app.worker
+    depends_on:
+      db:
+        condition: service_healthy
+    deploy:
+      replicas: 2              # more than one worker from day one -> forces you to handle concurrency
+
+volumes:
+  pgdata:
+  storage:
