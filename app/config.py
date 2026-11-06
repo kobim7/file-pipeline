@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     retention_hours: int = 24
     worker_poll_seconds: float = 1.0
     log_level: str = "INFO"
-
-
+    api_keys: str = ""
+    step_max_attempts: int = 3
+    retry_backoff_seconds: float = 1.0
+    heartbeat_seconds: float = 10.0
+    stale_job_seconds: float = 60.0
+    step_timeout_seconds: float = 600.0
+    
 settings = Settings()

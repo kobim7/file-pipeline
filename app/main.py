@@ -23,6 +23,11 @@ app = FastAPI(title="File Processing Pipeline")
 
 ALLOWED_EXTENSIONS = {".csv", ".json", ".txt", ".zip", ".gz"}
 
+def require_api_key(x_api_key: str = Header(...)) -> str:
+    allowed = {k.strip() for k in settings.api_keys.split(",") if k.strip()}
+    if allowed and x_api_key not in allowed:
+        raise HTTPException(401, "Invalid API key")
+    return x_api_key
 
 @app.on_event("startup")
 def on_startup() -> None:
@@ -39,7 +44,7 @@ def health() -> dict:
 def create_job(
     file: UploadFile,
     pipeline: str = Form(...),
-    x_api_key: str = Header(...),
+    x_api_key: str = Depends(require_api_key),
     session: Session = Depends(get_session),
 ):
     try:
@@ -107,7 +112,7 @@ def _pipeline_errors(e: ValidationError) -> str:
 @app.get("/jobs/{job_id}", response_model=JobOut)
 def get_job(
     job_id: uuid.UUID,
-    x_api_key: str = Header(...),
+    x_api_key: str = Depends(require_api_key),
     session: Session = Depends(get_session),
 ):
     job = _get_owned_job(session, job_id, x_api_key)
@@ -120,7 +125,7 @@ def get_job(
 @app.get("/jobs/{job_id}/result")
 def download_result(
     job_id: uuid.UUID,
-    x_api_key: str = Header(...),
+    x_api_key: str = Depends(require_api_key),
     session: Session = Depends(get_session),
 ):
     job = _get_owned_job(session, job_id, x_api_key)
@@ -133,7 +138,7 @@ def download_result(
 def download_step_result(
     job_id: uuid.UUID,
     step_index: int,
-    x_api_key: str = Header(...),
+    x_api_key: str = Depends(require_api_key),
     session: Session = Depends(get_session),
 ):
     job = _get_owned_job(session, job_id, x_api_key)

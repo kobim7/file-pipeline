@@ -36,12 +36,13 @@ services:
       - ./app:/code/app
       - storage:/data
     command: python -m app.worker
+    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     deploy:
-      replicas: 2              # more than one worker from day one -> forces you to handle concurrency
-
+      replicas: 2
+      
 volumes:
   pgdata:
   storage:
