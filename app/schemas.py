@@ -2,7 +2,25 @@ from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
+ALLOWED_STEPS = {"validate", "transform", "convert", "compress", "notify"}
+
+class StepIn(BaseModel):
+    step: str
+    params: dict = {}
+
+    @field_validator("step")
+    @classmethod
+    def step_must_exist(cls, value: str) -> str:
+        if value not in ALLOWED_STEPS:
+            raise ValueError(f"unknown step '{value}'")
+        return value
+
+
+class JobCreated(BaseModel):
+    id: UUID
+    status: str
 
 class StepOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -27,3 +45,5 @@ class JobOut(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     steps: list[StepOut]
+
+    
