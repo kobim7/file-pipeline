@@ -8,6 +8,7 @@ from datetime import timedelta
 
 import structlog
 from sqlalchemy import and_, or_, select, update
+
 from app.cleanup import run_cleanup, set_expiry
 from app.config import settings
 from app.db import SessionLocal, ping
@@ -131,6 +132,20 @@ def run_step(session, step, src, dst):
             time.sleep(delay)
 
 
+def stop_if_cancelled(session, job) -> bool:
+    """Re-read the job's status under a row lock. If the user cancelled it, wrap up and stop."""
+    session.refresh(job, with_for_update=True)
+    if job.status != JobStatus.CANCELLED:
+        return False
+    for step in job.steps:
+        if step.status == StepStatus.PENDING:
+            step.status = StepStatus.SKIPPED
+    set_expiry(job)  # again, to cover files created after the cancel request
+    session.commit()
+    log.info("job_stopped_after_cancel")
+    return True
+
+
 def process_job(job_id: uuid.UUID) -> None:
     with SessionLocal() as session:
         job = session.get(Job, job_id)
@@ -140,6 +155,8 @@ def process_job(job_id: uuid.UUID) -> None:
             if step.status == StepStatus.COMPLETED:
                 current = step.output_file
                 continue
+            if stop_if_cancelled(session, job):
+                return
 
             structlog.contextvars.bind_contextvars(step=step.step_type, step_index=step.step_index)
 
@@ -158,6 +175,8 @@ def process_job(job_id: uuid.UUID) -> None:
             try:
                 result = run_step(session, step, src, dst)
             except Exception as e:
+                if stop_if_cancelled(session, job):
+                    return
                 step.status = StepStatus.FAILED
                 step.error_message = str(e)
                 step.completed_at = utcnow()
@@ -186,6 +205,8 @@ def process_job(job_id: uuid.UUID) -> None:
             session.commit()
             log.info("step_completed", duration_ms=step.duration_ms)
 
+        if stop_if_cancelled(session, job):
+            return
         if current.kind == FileKind.INTERMEDIATE:
             current.kind = FileKind.OUTPUT
         job.output_file = current
@@ -224,6 +245,7 @@ def main() -> None:
             log.exception("job_crashed")
         finally:
             heartbeat.stop()
+
 
 if __name__ == "__main__":
     main()

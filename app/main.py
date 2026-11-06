@@ -7,11 +7,12 @@ from fastapi.responses import FileResponse
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.orm import Session
 
-from app import db, models  # noqa: F401
+from app import db, models
+from app.cleanup import set_expiry
 from app.config import settings
 from app.db import get_session
 from app.logging_setup import setup_logging
-from app.models import FileKind, FileReference, Job, JobStatus, JobStep, StepStatus
+from app.models import FileKind, FileReference, Job, JobStatus, JobStep, StepStatus, utcnow
 from app.schemas import JobCreated, JobOut, StepIn
 from app.storage import FileTooLarge, full_path, save_upload
 
@@ -149,6 +150,28 @@ def download_step_result(
         raise HTTPException(409, f"step is {step.status}, its result is ready only when it's completed")
     return _file_response(step.output_file, job.input_file.original_filename)
 
+@app.post("/jobs/{job_id}/cancel", response_model=JobOut)
+def cancel_job(
+    job_id: uuid.UUID,
+    x_api_key: str = Depends(require_api_key),
+    session: Session = Depends(get_session),
+):
+    job = _get_owned_job(session, job_id, x_api_key)
+    session.refresh(job, with_for_update=True)  # lock the row so a worker can't finish it meanwhile
+    if job.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+        raise HTTPException(409, f"job is already {job.status}")
+
+    previous = job.status
+    job.status = JobStatus.CANCELLED
+    job.completed_at = utcnow()
+    for step in job.steps:
+        if step.status == StepStatus.PENDING:
+            step.status = StepStatus.SKIPPED
+    set_expiry(job)
+    session.commit()
+
+    log.info("job_cancelled", job_id=str(job.id), previous_status=previous)
+    return JobOut.model_validate(job)
 
 def _get_owned_job(session: Session, job_id: uuid.UUID, api_key: str) -> Job:
     job = session.get(Job, job_id)
