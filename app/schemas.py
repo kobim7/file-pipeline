@@ -53,3 +53,4 @@ class JobOut(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     steps: list[StepOut]
+    result_url: str | None = None

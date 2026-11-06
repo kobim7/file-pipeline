@@ -3,6 +3,7 @@ from pathlib import Path
 
 import structlog
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.orm import Session
 
@@ -10,7 +11,7 @@ from app import db, models  # noqa: F401
 from app.config import settings
 from app.db import get_session
 from app.logging_setup import setup_logging
-from app.models import FileKind, FileReference, Job, JobStep
+from app.models import FileKind, FileReference, Job, JobStatus, JobStep, StepStatus
 from app.schemas import JobCreated, JobOut, StepIn
 from app.storage import FileTooLarge, full_path, save_upload
 
@@ -104,8 +105,68 @@ def _pipeline_errors(e: ValidationError) -> str:
     return "; ".join(problems)
 
 @app.get("/jobs/{job_id}", response_model=JobOut)
-def get_job(job_id: uuid.UUID, session: Session = Depends(get_session)):
+def get_job(
+    job_id: uuid.UUID,
+    x_api_key: str = Header(...),
+    session: Session = Depends(get_session),
+):
+    job = _get_owned_job(session, job_id, x_api_key)
+    out = JobOut.model_validate(job)
+    if job.status == JobStatus.COMPLETED:
+        out.result_url = f"/jobs/{job.id}/result"
+    return out
+
+
+@app.get("/jobs/{job_id}/result")
+def download_result(
+    job_id: uuid.UUID,
+    x_api_key: str = Header(...),
+    session: Session = Depends(get_session),
+):
+    job = _get_owned_job(session, job_id, x_api_key)
+    if job.status != JobStatus.COMPLETED:
+        raise HTTPException(409, f"job is {job.status}, the result is ready only when it's completed")
+    return _file_response(job.output_file, job.input_file.original_filename)
+
+
+@app.get("/jobs/{job_id}/steps/{step_index}/result")
+def download_step_result(
+    job_id: uuid.UUID,
+    step_index: int,
+    x_api_key: str = Header(...),
+    session: Session = Depends(get_session),
+):
+    job = _get_owned_job(session, job_id, x_api_key)
+    step = next((s for s in job.steps if s.step_index == step_index), None)
+    if step is None:
+        raise HTTPException(404, "Step not found")
+    if step.status != StepStatus.COMPLETED:
+        raise HTTPException(409, f"step is {step.status}, its result is ready only when it's completed")
+    return _file_response(step.output_file, job.input_file.original_filename)
+
+
+def _get_owned_job(session: Session, job_id: uuid.UUID, api_key: str) -> Job:
     job = session.get(Job, job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return JobOut.model_validate(job)
+    if job is None or job.api_key != api_key:
+        raise HTTPException(404, "Job not found")
+    return job
+
+
+def _file_response(file: FileReference, original_name: str | None) -> FileResponse:
+    path = full_path(file.storage_path)
+    if file.deleted_at is not None or not path.exists():
+        raise HTTPException(410, "The file has expired and was deleted")
+
+    base = Path(original_name or "result").name.split(".")[0]
+    download_name = base + "".join(Path(file.storage_path).suffixes)
+    return FileResponse(path, filename=download_name, media_type=_media_type(download_name))
+
+
+def _media_type(name: str) -> str:
+    if name.endswith(".gz"):
+        return "application/gzip"
+    if name.endswith(".json"):
+        return "application/json"
+    if name.endswith(".csv"):
+        return "text/csv"
+    return "application/octet-stream"
