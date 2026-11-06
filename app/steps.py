@@ -1,8 +1,10 @@
+import codecs
 import csv
 import gzip
 import json
 import shutil
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import ijson
@@ -24,15 +26,41 @@ def file_type(path: Path) -> str:
     return path.suffix.lstrip(".").lower()
 
 
+def text_encoding(path: Path) -> str:
+    """UTF-8 by default. A BOM at the start tells us otherwise (Excel adds one)."""
+    with path.open("rb") as f:
+        start = f.read(4)
+    if start.startswith(codecs.BOM_UTF8):
+        return "utf-8-sig"
+    if start.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return "utf-16"
+    return "utf-8"
+
+
+@contextmanager
+def bad_input_is_step_error():
+    """Encoding and CSV-format errors are problems with the file, so retrying won't help."""
+    try:
+        yield
+    except UnicodeDecodeError as e:
+        raise StepError(
+            f"file is not valid {e.encoding} text (unexpected byte {e.object[e.start]:#04x}); "
+            "save it as UTF-8 and upload again"
+        ) from e
+    except csv.Error as e:
+        raise StepError(f"malformed csv (often an unclosed quote): {e}") from e
+
+
 # --- reading and writing records, one at a time ---
 
 def read_records(path: Path):
     kind = file_type(path)
     if kind == "csv":
-        with path.open(newline="", encoding="utf-8") as f:
-            for line_no, row in enumerate(csv.DictReader(f), start=2):
+        with bad_input_is_step_error(), path.open(newline="", encoding=text_encoding(path)) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
                 if None in row:
-                    raise StepError(f"line {line_no} has more values than the header")
+                    raise StepError(f"line {reader.line_num} has more values than the header")
                 yield row
     elif kind == "json":
         with path.open("rb") as f:
@@ -86,21 +114,22 @@ def validate(src: Path, dst: Path, params: dict) -> Path:
         raise StepError(f"expected a {expected} file, got '.{kind}'")
 
     if kind == "csv":
-        with src.open(newline="", encoding="utf-8") as f:
+        encoding = text_encoding(src)
+        with bad_input_is_step_error(), src.open(newline="", encoding=encoding) as f:
             reader = csv.reader(f)
             header = next(reader, None)
             if not header:
                 raise StepError("csv file has no header row")
             rows = 0
-            for line_no, row in enumerate(reader, start=2):
+            for row in reader:
                 if not row:
                     continue
                 if len(row) != len(header):
                     raise StepError(
-                        f"line {line_no}: expected {len(header)} columns, got {len(row)}"
+                        f"line {reader.line_num}: expected {len(header)} columns, got {len(row)}"
                     )
                 rows += 1
-        log.info("file_validated", file_type="csv", columns=header, rows=rows)
+        log.info("file_validated", file_type="csv", encoding=encoding, columns=header, rows=rows)
 
     elif kind == "json":
         records = 0
