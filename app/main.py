@@ -44,7 +44,7 @@ def create_job(
     try:
         steps = TypeAdapter(list[StepIn]).validate_json(pipeline)
     except ValidationError as e:
-        raise HTTPException(422, f"invalid pipeline: {e}")
+        raise HTTPException(422, f"invalid pipeline: {_pipeline_errors(e)}")
     if not steps:
         raise HTTPException(422, "pipeline must have at least one step")
 
@@ -88,6 +88,20 @@ def create_job(
     log.info("job_created", job_id=str(job.id), size_bytes=size, steps=[s.step for s in steps])
     return JobCreated(id=job.id, status=job.status)
 
+
+
+def _pipeline_errors(e: ValidationError) -> str:
+    problems = []
+    for err in e.errors():
+        msg = err["msg"].removeprefix("Value error, ")
+        loc = err["loc"]
+        if not loc:
+            problems.append(msg)
+        elif len(loc) == 1:
+            problems.append(f"step {loc[0]}: {msg}")
+        else:
+            problems.append(f"step {loc[0]}, field '{loc[1]}': {msg}")
+    return "; ".join(problems)
 
 @app.get("/jobs/{job_id}", response_model=JobOut)
 def get_job(job_id: uuid.UUID, session: Session = Depends(get_session)):

@@ -1,29 +1,36 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
-ALLOWED_STEPS = {"validate", "transform", "convert", "compress", "notify"}
+from app.steps import STEP_PARAMS
+
 
 class StepIn(BaseModel):
     step: str
     params: dict = {}
 
-    @field_validator("step")
-    @classmethod
-    def step_must_exist(cls, value: str) -> str:
-        if value not in ALLOWED_STEPS:
-            raise ValueError(f"unknown step '{value}'")
-        return value
+    @model_validator(mode="after")
+    def check_step_and_params(self):
+        if self.step not in STEP_PARAMS:
+            raise ValueError(f"unknown step '{self.step}', expected one of {sorted(STEP_PARAMS)}")
+        unknown = set(self.params) - STEP_PARAMS[self.step]
+        if unknown:
+            raise ValueError(
+                f"step '{self.step}' got unknown params {sorted(unknown)}, "
+                f"allowed: {sorted(STEP_PARAMS[self.step])}"
+            )
+        return self
 
 
 class JobCreated(BaseModel):
     id: UUID
     status: str
 
+
 class StepOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
     step_index: int
     step_type: str
     status: str
@@ -36,6 +43,7 @@ class StepOut(BaseModel):
 
 class JobOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     status: str
     current_step_index: int
@@ -45,5 +53,3 @@ class JobOut(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     steps: list[StepOut]
-
-    
