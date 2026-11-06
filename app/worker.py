@@ -8,7 +8,7 @@ from datetime import timedelta
 
 import structlog
 from sqlalchemy import and_, or_, select, update
-
+from app.cleanup import run_cleanup, set_expiry
 from app.config import settings
 from app.db import SessionLocal, ping
 from app.logging_setup import setup_logging
@@ -166,6 +166,7 @@ def process_job(job_id: uuid.UUID) -> None:
                 job.status = JobStatus.FAILED
                 job.error_message = f"step {step.step_index} ({step.step_type}) failed: {e}"
                 job.completed_at = utcnow()
+                set_expiry(job)
                 session.commit()
                 log.warning("step_failed", error=str(e))
                 return
@@ -190,6 +191,7 @@ def process_job(job_id: uuid.UUID) -> None:
         job.output_file = current
         job.status = JobStatus.COMPLETED
         job.completed_at = utcnow()
+        set_expiry(job)
         session.commit()
         log.info("job_completed")
 
@@ -199,8 +201,13 @@ def main() -> None:
     signal.signal(signal.SIGINT, stop)
     ping()
     log.info("worker_started", worker_id=WORKER_ID)
+    last_cleanup = 0.0
 
     while running:
+        if time.monotonic() - last_cleanup > settings.cleanup_interval_seconds:
+            run_cleanup()
+            last_cleanup = time.monotonic()
+
         job_id = claim_next_job()
         if job_id is None:
             time.sleep(settings.worker_poll_seconds)
@@ -217,7 +224,6 @@ def main() -> None:
             log.exception("job_crashed")
         finally:
             heartbeat.stop()
-
 
 if __name__ == "__main__":
     main()

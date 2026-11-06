@@ -213,7 +213,7 @@ def compress(src: Path, dst: Path, params: dict) -> Path:
 
     out = dst.with_suffix(src.suffix + ".gz")
     try:
-        with src.open("rb") as f, gzip.open(out, "wb") as gz:
+        with src.open("rb") as f, gzip.open(out, "wb", compresslevel=6) as gz:
             shutil.copyfileobj(f, gz, length=CHUNK_SIZE)
     except Exception:
         out.unlink(missing_ok=True)

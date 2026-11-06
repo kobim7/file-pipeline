@@ -14,5 +14,9 @@ class Settings(BaseSettings):
     heartbeat_seconds: float = 10.0
     stale_job_seconds: float = 60.0
     step_timeout_seconds: float = 600.0
-    
+    retention_hours: float = 24
+    intermediate_retention_hours: float = 1
+    cleanup_interval_seconds: float = 300
+    orphan_grace_seconds: float = 3600
+
 settings = Settings()
