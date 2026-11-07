@@ -125,3 +125,95 @@ def test_job_from_crashed_worker_resumes_after_last_completed_step(client, monke
     assert ran == []  # step 0 was already done, so it didn't run again
     with SessionLocal() as session:
         assert session.get(Job, uuid.UUID(job_id)).steps[1].attempts == 2
+
+
+def test_csv_encodings_and_quoting(client):
+    convert = [{"step": "convert", "params": {"output_format": "json"}}]
+    # Non-ASCII letters, a comma inside quotes, and a line break inside quotes.
+    text = "name,note\nJosé,\"Zürich, Switzerland\"\nMüller,\"first line\nsecond line\"\n"
+    expected = [
+        {"name": "José", "note": "Zürich, Switzerland"},
+        {"name": "Müller", "note": "first line\nsecond line"},
+    ]
+    for encoding in ("utf-8", "utf-8-sig", "utf-16"):  # utf-8-sig = Excel's "CSV UTF-8"
+        job_id = upload(client, convert, content=text.encode(encoding)).json()["id"]
+        run_worker()
+        r = client.get(f"/jobs/{job_id}/result", headers=HEADERS)
+        assert r.json() == expected, encoding
+
+    # A legacy Windows encoding without a BOM can't be detected, so it must be rejected.
+    legacy = upload(client, [{"step": "validate"}], content=text.encode("cp1252")).json()["id"]
+    run_worker()
+    job = get_job(client, legacy)
+    assert job["status"] == "failed"
+    assert "save it as UTF-8" in job["error_message"]
+    with SessionLocal() as session:
+        assert session.get(Job, uuid.UUID(legacy)).steps[0].attempts == 1  # not retried
+
+
+def test_semicolon_delimited_csv(client):
+    # European Excel writes ';' because ',' is the decimal separator there.
+    content = "name;price\nKobi;12,5\nDana;7\n".encode()
+    job_id = upload(client, [{"step": "convert", "params": {"output_format": "json"}}], content=content).json()["id"]
+    run_worker()
+
+    r = client.get(f"/jobs/{job_id}/result", headers=HEADERS)
+    assert r.json() == [{"name": "Kobi", "price": "12,5"}, {"name": "Dana", "price": "7"}]
+
+
+def test_json_with_bom_and_utf16(client):
+    to_csv = [{"step": "validate"}, {"step": "convert", "params": {"output_format": "csv"}}]
+    body = json.dumps([{"name": "José"}], ensure_ascii=False)
+    for encoding in ("utf-8-sig", "utf-16"):
+        job_id = upload(client, to_csv, content=body.encode(encoding), filename="people.json").json()["id"]
+        run_worker()
+        r = client.get(f"/jobs/{job_id}/result", headers=HEADERS)
+        assert r.text.splitlines() == ["name", "José"], encoding
+
+
+def test_broken_json_fails_without_retries_even_without_validate(client):
+    pipeline = [{"step": "convert", "params": {"output_format": "csv"}}]
+    job_id = upload(client, pipeline, content=b'[{"n": 1}, {"n":', filename="broken.json").json()["id"]
+    run_worker()
+
+    job = get_job(client, job_id)
+    assert job["status"] == "failed"
+    assert "invalid json" in job["error_message"]
+    with SessionLocal() as session:
+        assert session.get(Job, uuid.UUID(job_id)).steps[0].attempts == 1
+
+
+def _zip(files: dict) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
+def test_zip_extraction_picks_the_data_file(client):
+    pipeline = [{"step": "decompress"}, {"step": "convert", "params": {"output_format": "json"}}]
+
+    # One csv next to other files: picked automatically.
+    content = _zip({"data/people.csv": "name\nKobi\n", "README.txt": "hi", "__MACOSX/._people.csv": "x"})
+    job_id = upload(client, pipeline, content=content, filename="export.zip").json()["id"]
+    run_worker()
+    assert client.get(f"/jobs/{job_id}/result", headers=HEADERS).json() == [{"name": "Kobi"}]
+
+    # Not a data archive at all (say, an app installer): clear, short error.
+    app = _zip({f"App.app/Contents/Resources/{i}.lproj/Localizable.strings": "x" for i in range(200)})
+    job_id = upload(client, pipeline, content=app, filename="installer.zip").json()["id"]
+    run_worker()
+    error = get_job(client, job_id)["error_message"]
+    assert "no csv or json files" in error
+    assert "and 190 more" in error
+    assert len(error) < 1000
+
+    # Two data files: ask the user to pick.
+    two = _zip({"a.csv": "x\n1\n", "b.json": "[]"})
+    job_id = upload(client, pipeline, content=two, filename="two.zip").json()["id"]
+    run_worker()
+    assert "pick one with params.member" in get_job(client, job_id)["error_message"]
