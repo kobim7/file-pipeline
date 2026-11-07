@@ -1,0 +1,4 @@
+name	city	age
+Kobi	Haifa	40
+Dana	Tel Aviv	31
+Ron	Haifa	25

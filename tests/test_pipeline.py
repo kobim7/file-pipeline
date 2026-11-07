@@ -208,7 +208,7 @@ def test_zip_extraction_picks_the_data_file(client):
     job_id = upload(client, pipeline, content=app, filename="installer.zip").json()["id"]
     run_worker()
     error = get_job(client, job_id)["error_message"]
-    assert "no csv or json files" in error
+    assert "no csv, json or txt files" in error
     assert "and 190 more" in error
     assert len(error) < 1000
 
@@ -250,3 +250,79 @@ def test_uploaded_gz_keeps_the_inner_file_type(client):
     job_id = upload(client, pipeline, content=gzip.compress(b"name\nKobi\n"), filename="people.gz").json()["id"]
     run_worker()
     assert "name it like data.csv.gz" in get_job(client, job_id)["error_message"]
+
+
+def test_header_problems_fail_instead_of_losing_data(client):
+    convert = [{"step": "convert", "params": {"output_format": "json"}}]
+    cases = {
+        "id,name,name\n1,Kobi,Cohen\n": "duplicate column names in the header: ['name']",
+        "id,,city\n1,x,Haifa\n": "column 2 has no name",
+        "a,b,c\n1,2\n": "line 2: expected 3 columns, got 2",  # short row, even without validate
+        'name,note\nKobi,"never closed\nDana,ok\n': "malformed csv",  # used to swallow the rest of the file
+    }
+    for content, error in cases.items():
+        job_id = upload(client, convert, content=content.encode()).json()["id"]
+        run_worker()
+        job = get_job(client, job_id)
+        assert job["status"] == "failed", content
+        assert error in job["error_message"], content
+
+
+def test_header_names_are_trimmed_and_blank_lines_skipped(client):
+    pipeline = [{"step": "transform", "params": {"select_columns": ["city"]}}]
+    job_id = upload(client, pipeline, content=b"\nname, city\nKobi,Haifa\n\n").json()["id"]
+    run_worker()
+    assert client.get(f"/jobs/{job_id}/result", headers=HEADERS).text.splitlines() == ["city", "Haifa"]
+
+
+def test_delimiter_is_detected_from_the_rows_not_just_the_header(client):
+    # The header has a comma inside quotes, but the file is delimited with ';'.
+    content = '"Last, First";City\n"Cohen, Kobi";Haifa\n'.encode()
+    job_id = upload(client, [{"step": "convert", "params": {"output_format": "json"}}], content=content).json()["id"]
+    run_worker()
+    assert client.get(f"/jobs/{job_id}/result", headers=HEADERS).json() == [{"Last, First": "Cohen, Kobi", "City": "Haifa"}]
+
+
+def test_plain_text_is_not_accepted_as_a_one_column_table(client):
+    for content in (b"just a note\nanother line\n", b"name   city\nKobi   Haifa\n"):
+        job_id = upload(client, [{"step": "validate"}], content=content, filename="notes.txt").json()["id"]
+        run_worker()
+        assert "need at least 2 columns" in get_job(client, job_id)["error_message"]
+
+    # unless the user says it's a table
+    pipeline = [{"step": "validate", "params": {"delimiter": ","}}]
+    job_id = upload(client, pipeline, content=b"name\nKobi\n", filename="names.txt").json()["id"]
+    run_worker()
+    assert get_job(client, job_id)["status"] == "completed"
+
+
+def test_read_options_encoding_delimiter_and_no_header(client):
+    def result(pipeline, content, filename="data.csv"):
+        job_id = upload(client, pipeline, content=content, filename=filename).json()["id"]
+        run_worker()
+        return client.get(f"/jobs/{job_id}/result", headers=HEADERS)
+
+    to_json = lambda **p: [{"step": "convert", "params": {"output_format": "json", **p}}]
+
+    assert result(to_json(has_header=False), b"Kobi,Haifa\n").json() == [{"column_1": "Kobi", "column_2": "Haifa"}]
+    assert result(to_json(encoding="cp1252"), "name\nJosé\n".encode("cp1252")).json() == [{"name": "José"}]
+    assert result(to_json(delimiter="|"), b"a|b\n1|2\n", "data.txt").json() == [{"a": "1", "b": "2"}]
+
+    bad = upload(client, to_json(encoding="klingon"), content=b"a,b\n1,2\n").json()["id"]
+    run_worker()
+    assert "unknown encoding" in get_job(client, bad)["error_message"]
+
+
+def test_zip_falls_back_to_a_single_txt_file(client):
+    pipeline = [{"step": "decompress"}, {"step": "convert", "params": {"output_format": "json"}}]
+
+    only_txt = _zip({"data.txt": "a\tb\n1\t2\n"})
+    job_id = upload(client, pipeline, content=only_txt, filename="export.zip").json()["id"]
+    run_worker()
+    assert client.get(f"/jobs/{job_id}/result", headers=HEADERS).json() == [{"a": "1", "b": "2"}]
+
+    # a readme.txt next to a csv is still ignored
+    with_readme = _zip({"data.csv": "a,b\n1,2\n", "readme.txt": "hello"})
+    job_id = upload(client, pipeline, content=with_readme, filename="export.zip").json()["id"]
+    run_worker()
+    assert client.get(f"/jobs/{job_id}/result", headers=HEADERS).json() == [{"a": "1", "b": "2"}]
