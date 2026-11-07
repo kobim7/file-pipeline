@@ -16,6 +16,7 @@ JSON_VALUES = {"start_map", "start_array", "string", "number", "boolean", "null"
 FILTER_OPS = {"equals", "not_equals", "contains"}
 CSV_DELIMITERS = [",", ";", "\t", "|"]
 DATA_SUFFIXES = {".csv", ".json"}
+TABLE_TYPES = {"csv", "txt"}  # .txt is read as delimited text, e.g. Excel's "Text (Tab delimited)"
 CHUNK_SIZE = 1024 * 1024
 MAX_EXTRACTED_BYTES = 1024 * 1024 * 1024  # 1GB, protects against zip bombs
 
@@ -96,7 +97,7 @@ def _first_line(e: Exception) -> str:
 
 def read_records(path: Path):
     kind = file_type(path)
-    if kind == "csv":
+    if kind in TABLE_TYPES:
         with bad_input_is_step_error(), path.open(newline="", encoding=text_encoding(path)) as f:
             reader = csv.DictReader(f, delimiter=csv_delimiter(f))
             for row in reader:
@@ -124,11 +125,12 @@ def write_records(path: Path, records, fieldnames: list | None = None) -> int:
                 rows += 1
             out.write("\n]\n")
 
-        elif kind == "csv":
+        elif kind in TABLE_TYPES:
+            delimiter = "\t" if kind == "txt" else ","
             writer = None
             for record in records:
                 if writer is None:
-                    writer = csv.DictWriter(out, fieldnames=fieldnames or list(record))
+                    writer = csv.DictWriter(out, fieldnames=fieldnames or list(record), delimiter=delimiter)
                     writer.writeheader()
                 extra = set(record) - set(writer.fieldnames)
                 if extra:
@@ -139,7 +141,7 @@ def write_records(path: Path, records, fieldnames: list | None = None) -> int:
                 })
                 rows += 1
             if writer is None and fieldnames:
-                csv.writer(out).writerow(fieldnames)
+                csv.writer(out, delimiter=delimiter).writerow(fieldnames)
 
         else:
             raise StepError(f"can't write records to '.{kind}' files")
@@ -154,14 +156,14 @@ def validate(src: Path, dst: Path, params: dict) -> Path:
     if kind != expected:
         raise StepError(f"expected a {expected} file, got '.{kind}'")
 
-    if kind == "csv":
+    if kind in TABLE_TYPES:
         encoding = text_encoding(src)
         with bad_input_is_step_error(), src.open(newline="", encoding=encoding) as f:
             delimiter = csv_delimiter(f)
             reader = csv.reader(f, delimiter=delimiter)
             header = next(reader, None)
             if not header:
-                raise StepError("csv file has no header row")
+                raise StepError(f"{kind} file has no header row")
             rows = 0
             for row in reader:
                 if not row:
@@ -171,7 +173,7 @@ def validate(src: Path, dst: Path, params: dict) -> Path:
                         f"line {reader.line_num}: expected {len(header)} columns, got {len(row)}"
                     )
                 rows += 1
-        log.info("file_validated", file_type="csv", encoding=encoding, delimiter=delimiter,
+        log.info("file_validated", file_type=kind, encoding=encoding, delimiter=delimiter,
                  columns=header, rows=rows)
 
     elif kind == "json":
@@ -297,6 +299,8 @@ def decompress(src: Path, dst: Path, params: dict) -> Path:
     try:
         if kind == "gz":
             inner_suffix = Path(src.stem).suffix
+            if not inner_suffix:
+                raise StepError("can't tell what's inside the .gz file, name it like data.csv.gz")
             out = dst.with_suffix(inner_suffix)
             with gzip.open(src, "rb") as f:
                 size = _copy_limited(f, out)

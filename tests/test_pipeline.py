@@ -217,3 +217,36 @@ def test_zip_extraction_picks_the_data_file(client):
     job_id = upload(client, pipeline, content=two, filename="two.zip").json()["id"]
     run_worker()
     assert "pick one with params.member" in get_job(client, job_id)["error_message"]
+
+
+def test_tab_delimited_txt_file(client):
+    # Excel's "Text (Tab delimited)" export.
+    content = b"name\tcity\nKobi\tHaifa\nDana\tTel Aviv\n"
+    pipeline = [{"step": "validate"}, {"step": "convert", "params": {"output_format": "json"}}]
+    job_id = upload(client, pipeline, content=content, filename="people.txt").json()["id"]
+    run_worker()
+
+    r = client.get(f"/jobs/{job_id}/result", headers=HEADERS)
+    assert r.json() == [{"name": "Kobi", "city": "Haifa"}, {"name": "Dana", "city": "Tel Aviv"}]
+
+    # transform keeps it a tab-delimited .txt file
+    job_id = upload(client, [{"step": "transform", "params": {"case": "upper"}}],
+                    content=content, filename="people.txt").json()["id"]
+    run_worker()
+    r = client.get(f"/jobs/{job_id}/result", headers=HEADERS)
+    assert 'filename="people.txt"' in r.headers["content-disposition"]
+    assert r.text.splitlines()[1] == "KOBI\tHAIFA"
+
+
+def test_uploaded_gz_keeps_the_inner_file_type(client):
+    import gzip
+
+    pipeline = [{"step": "decompress"}, {"step": "convert", "params": {"output_format": "json"}}]
+    job_id = upload(client, pipeline, content=gzip.compress(b"name\nKobi\n"), filename="people.csv.gz").json()["id"]
+    run_worker()
+    assert client.get(f"/jobs/{job_id}/result", headers=HEADERS).json() == [{"name": "Kobi"}]
+
+    # A .gz with no inner extension: a clear error instead of a confusing one.
+    job_id = upload(client, pipeline, content=gzip.compress(b"name\nKobi\n"), filename="people.gz").json()["id"]
+    run_worker()
+    assert "name it like data.csv.gz" in get_job(client, job_id)["error_message"]

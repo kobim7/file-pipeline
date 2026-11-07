@@ -16,8 +16,17 @@ def full_path(storage_path: str) -> Path:
     return Path(settings.storage_root) / storage_path
 
 
+def upload_suffix(filename: str) -> str:
+    """'.csv' for data.csv, but '.csv.gz' for data.csv.gz, so we still know what's inside."""
+    name = Path(filename)
+    suffix = name.suffix.lower()
+    if suffix == ".gz":
+        suffix = Path(name.stem).suffix.lower() + suffix
+    return suffix
+
+
 def save_upload(upload: UploadFile, folder: str) -> tuple[str, int]:
-    suffix = Path(upload.filename or "").suffix.lower()
+    suffix = upload_suffix(upload.filename or "")
     storage_path = f"{folder}/{uuid.uuid4()}{suffix}"
     dest = full_path(storage_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
