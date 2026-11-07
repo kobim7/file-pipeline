@@ -14,6 +14,8 @@ log = structlog.get_logger()
 
 JSON_VALUES = {"start_map", "start_array", "string", "number", "boolean", "null"}
 FILTER_OPS = {"equals", "not_equals", "contains"}
+CSV_DELIMITERS = [",", ";", "\t", "|"]
+DATA_SUFFIXES = {".csv", ".json"}
 CHUNK_SIZE = 1024 * 1024
 MAX_EXTRACTED_BYTES = 1024 * 1024 * 1024  # 1GB, protects against zip bombs
 
@@ -37,9 +39,39 @@ def text_encoding(path: Path) -> str:
     return "utf-8"
 
 
+def csv_delimiter(f) -> str:
+    """Pick the delimiter that appears most in the header line. European Excel uses ';'."""
+    header = f.readline(65536)
+    f.seek(0)
+    counts = {d: header.count(d) for d in CSV_DELIMITERS}
+    best = max(counts, key=counts.get)
+    return best if counts[best] else ","
+
+
+class _Utf8Stream:
+    """Feeds ijson UTF-8 bytes from a file in another encoding."""
+
+    def __init__(self, text_file):
+        self.text_file = text_file
+
+    def read(self, size=-1):
+        return self.text_file.read(size).encode("utf-8")
+
+
+@contextmanager
+def open_json(path: Path):
+    encoding = text_encoding(path)
+    if encoding == "utf-8":
+        with path.open("rb") as f:
+            yield f
+    else:  # has a BOM: decode it ourselves, ijson only reads plain UTF-8
+        with path.open(encoding=encoding) as f:
+            yield _Utf8Stream(f)
+
+
 @contextmanager
 def bad_input_is_step_error():
-    """Encoding and CSV-format errors are problems with the file, so retrying won't help."""
+    """Encoding and format errors are problems with the file, so retrying won't help."""
     try:
         yield
     except UnicodeDecodeError as e:
@@ -49,6 +81,15 @@ def bad_input_is_step_error():
         ) from e
     except csv.Error as e:
         raise StepError(f"malformed csv (often an unclosed quote): {e}") from e
+    except ijson.JSONError as e:
+        raise StepError(f"invalid json: {_first_line(e)}") from e
+
+
+def _first_line(e: Exception) -> str:
+    message = e.args[0] if e.args else str(e)
+    if isinstance(message, bytes):
+        message = message.decode(errors="replace")
+    return str(message).strip().splitlines()[0]
 
 
 # --- reading and writing records, one at a time ---
@@ -57,13 +98,13 @@ def read_records(path: Path):
     kind = file_type(path)
     if kind == "csv":
         with bad_input_is_step_error(), path.open(newline="", encoding=text_encoding(path)) as f:
-            reader = csv.DictReader(f)
+            reader = csv.DictReader(f, delimiter=csv_delimiter(f))
             for row in reader:
                 if None in row:
                     raise StepError(f"line {reader.line_num} has more values than the header")
                 yield row
     elif kind == "json":
-        with path.open("rb") as f:
+        with bad_input_is_step_error(), open_json(path) as f:
             for n, record in enumerate(ijson.items(f, "item", use_float=True), start=1):
                 if not isinstance(record, dict):
                     raise StepError(f"record {n} is not an object")
@@ -116,7 +157,8 @@ def validate(src: Path, dst: Path, params: dict) -> Path:
     if kind == "csv":
         encoding = text_encoding(src)
         with bad_input_is_step_error(), src.open(newline="", encoding=encoding) as f:
-            reader = csv.reader(f)
+            delimiter = csv_delimiter(f)
+            reader = csv.reader(f, delimiter=delimiter)
             header = next(reader, None)
             if not header:
                 raise StepError("csv file has no header row")
@@ -129,17 +171,15 @@ def validate(src: Path, dst: Path, params: dict) -> Path:
                         f"line {reader.line_num}: expected {len(header)} columns, got {len(row)}"
                     )
                 rows += 1
-        log.info("file_validated", file_type="csv", encoding=encoding, columns=header, rows=rows)
+        log.info("file_validated", file_type="csv", encoding=encoding, delimiter=delimiter,
+                 columns=header, rows=rows)
 
     elif kind == "json":
         records = 0
-        with src.open("rb") as f:
-            try:
-                for prefix, event, _ in ijson.parse(f):
-                    if prefix == "item" and event in JSON_VALUES:
-                        records += 1
-            except ijson.JSONError as e:
-                raise StepError(f"invalid json: {str(e).splitlines()[0]}")
+        with bad_input_is_step_error(), open_json(src) as f:
+            for prefix, event, _ in ijson.parse(f):
+                if prefix == "item" and event in JSON_VALUES:
+                    records += 1
         log.info("file_validated", file_type="json", records=records)
 
     else:
@@ -284,11 +324,24 @@ def _pick_zip_member(archive: zipfile.ZipFile, wanted: str | None) -> str:
     ]
     if wanted:
         if wanted not in files:
-            raise StepError(f"'{wanted}' is not in the archive, it has: {files}")
+            raise StepError(f"'{wanted}' is not in the archive ({_preview(files)})")
         return wanted
-    if len(files) != 1:
-        raise StepError(f"archive has {len(files)} files, pick one with params.member: {files}")
-    return files[0]
+
+    data_files = [name for name in files if Path(name).suffix.lower() in DATA_SUFFIXES]
+    if len(data_files) == 1:
+        return data_files[0]
+    if not data_files:
+        raise StepError(f"archive has no csv or json files ({_preview(files)})")
+    raise StepError(
+        f"archive has {len(data_files)} csv/json files, pick one with params.member ({_preview(data_files)})"
+    )
+
+
+def _preview(names: list[str], limit: int = 10) -> str:
+    """Keep error messages short: a zip can hold thousands of files."""
+    shown = ", ".join(names[:limit])
+    more = f", and {len(names) - limit} more" if len(names) > limit else ""
+    return f"{len(names)} files: {shown}{more}"
 
 
 def _copy_limited(f, out: Path) -> int:
